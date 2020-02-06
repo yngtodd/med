@@ -122,7 +122,6 @@ def test(mask, model, data, loader, device):
 
 
 def run_trainer():
-
     dataset = Reddit('~/data')
     data = dataset[0]
     loader = NeighborSampler(
