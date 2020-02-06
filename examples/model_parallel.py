@@ -14,12 +14,23 @@ from torch_geometric.nn import SAGEConv, GATConv
 
 
 def _call_method(method, rref, *args, **kwargs):
+    r"""
+    a helper function to call a method on the given RRef
+    """
     return method(rref.local_value(), *args, **kwargs)
 
 
 def _remote_method(method, rref, *args, **kwargs):
-    args = [method, rref] + list(args)
-    return rpc_sync(rref.owner(), _call_method, args=args, kwargs=kwargs)
+    r"""
+    a helper function to run method on the owner of rref and fetch back the
+    result using RPC
+    """
+    return rpc.rpc_sync(
+        rref.owner(),
+        _call_method,
+        args=[method, rref] + list(args),
+        kwargs=kwargs
+    )
 
 
 def _parameter_rrefs(module):
@@ -73,7 +84,7 @@ class GRPCNet(torch.nn.Module):
     def __init__(self, ps, in_channels, out_channels):
         super(GRPCNet, self).__init__()
         self.gat_in = GATin(in_channels)
-        self.gat_out_rref = rpc.remote(ps, GATout, args=(out_channels))
+        self.gat_out_rref = rpc.remote(ps, GATout, args=(out_channels,))
 
     def forward(self, x, data_flow):
         x, block = self.gat_in(x, data_flow)
@@ -91,8 +102,18 @@ class GRPCNet(torch.nn.Module):
         print('I have the gat_out params')
         return remote_params
 
+    def ___parameter_rrefs(self):
+        remote_params = []
+        # get RRefs of embedding table
+        remote_params.extend(_remote_method(_parameter_rrefs, self.emb_table_rref))
+        # create RRefs for local parameters
+        remote_params.extend(_parameter_rrefs(self.rnn))
+        # get RRefs of decoder
+        remote_params.extend(_remote_method(_parameter_rrefs, self.decoder_rref))
+        return remote_params
 
-def train(model, loader, optimizer, device):
+
+def train(model, data, loader, optimizer, device):
     model.train()
     total_loss = 0
     for data_flow in loader(data.train_mask):
@@ -105,7 +126,7 @@ def train(model, loader, optimizer, device):
     return total_loss / data.train_mask.sum().item()
 
 
-def test(mask, model, loader, device):
+def test(mask, model, data, loader, device):
     model.eval()
     correct = 0
     for data_flow in loader(mask):
@@ -135,8 +156,8 @@ def run_trainer():
     )
 
     for epoch in range(1, 31):
-        loss = train(model, loader, optimizer, device)
-        test_acc = test(data.test_mask, model, loader, device)
+        loss = train(model, data, loader, optimizer, device)
+        test_acc = test(data.test_mask, model, data, loader, device)
         print('Epoch: {:02d}, Loss: {:.4f}, Test: {:.4f}'.format(
               epoch, loss, test_acc))
 
