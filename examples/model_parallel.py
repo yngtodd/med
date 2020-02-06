@@ -73,10 +73,7 @@ class GATout(torch.nn.Module):
         )
 
     def forward(self, x, block):
-        x = self.conv(
-            (x, x[block.res_n_id]), block.edge_index, size=block.size
-        )
-        return F.log_softmax(x, dim=1)
+        return self.conv((x, x[block.res_n_id]), block.edge_index, size=block.size)
 
 
 class GRPCNet(torch.nn.Module):
@@ -108,9 +105,6 @@ def train(model, data, loader, optimizer, criterion, device):
     for data_flow in loader(data.train_mask):
         with dist_autograd.context():
             out = model(data.x.to(device), data_flow.to(device))
-            print('='*25)
-            print(f'out shape: {out.shape}, y: {data.y[data_flow.n_id].shape}')
-            print('='*25)
             loss = criterion(out, data.y[data_flow.n_id].to(device))
             dist_autograd.backward([loss])
             optimizer.step()
@@ -136,11 +130,10 @@ def run_trainer():
         shuffle=True, add_self_loops=True
     )
 
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    #device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     device = torch.device('cpu')
     model = GRPCNet("ps", dataset.num_features, dataset.num_classes).to(device)
     criterion = torch.nn.CrossEntropyLoss()
-    #optimizer = torch.optim.Adam(model.parameters(), lr=0.01, weight_decay=5e-4)
 
     # setup distributed optimizer
     optimizer = DistributedOptimizer(
