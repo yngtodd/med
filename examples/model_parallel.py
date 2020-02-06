@@ -6,6 +6,7 @@ import torch.multiprocessing as mp
 import torch.distributed.rpc as rpc
 from torch.distributed.rpc import RRef
 from torch.distributed.rpc import rpc_sync
+import torch.distributed.autograd as dist_autograd
 from torch.distributed.optim import DistributedOptimizer
 
 from torch_geometric.datasets import Reddit
@@ -96,33 +97,24 @@ class GRPCNet(torch.nn.Module):
         remote_params = []
         # create RRefs for local parameters
         remote_params.extend(_parameter_rrefs(self.gat_in))
-        print('I have the gat_in params')
         # get RRefs of the GATout module 
         remote_params.extend(_remote_method(_parameter_rrefs, self.gat_out_rref))
-        print('I have the gat_out params')
-        return remote_params
-
-    def ___parameter_rrefs(self):
-        remote_params = []
-        # get RRefs of embedding table
-        remote_params.extend(_remote_method(_parameter_rrefs, self.emb_table_rref))
-        # create RRefs for local parameters
-        remote_params.extend(_parameter_rrefs(self.rnn))
-        # get RRefs of decoder
-        remote_params.extend(_remote_method(_parameter_rrefs, self.decoder_rref))
         return remote_params
 
 
-def train(model, data, loader, optimizer, device):
+def train(model, data, loader, optimizer, criterion, device):
     model.train()
     total_loss = 0
     for data_flow in loader(data.train_mask):
-        optimizer.zero_grad()
-        out = model(data.x.to(device), data_flow.to(device))
-        loss = F.nll_loss(out, data.y[data_flow.n_id].to(device))
-        loss.backward()
-        optimizer.step()
-        total_loss += loss.item() * data_flow.batch_size
+        with dist_autograd.context():
+            out = model(data.x.to(device), data_flow.to(device))
+            print('='*25)
+            print(f'out shape: {out.shape}, y: {data.y[data_flow.n_id].shape}')
+            print('='*25)
+            loss = criterion(out, data.y[data_flow.n_id].to(device))
+            dist_autograd.backward([loss])
+            optimizer.step()
+            total_loss += loss.item() * data_flow.batch_size
     return total_loss / data.train_mask.sum().item()
 
 
@@ -145,7 +137,9 @@ def run_trainer():
     )
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    device = torch.device('cpu')
     model = GRPCNet("ps", dataset.num_features, dataset.num_classes).to(device)
+    criterion = torch.nn.CrossEntropyLoss()
     #optimizer = torch.optim.Adam(model.parameters(), lr=0.01, weight_decay=5e-4)
 
     # setup distributed optimizer
@@ -156,7 +150,7 @@ def run_trainer():
     )
 
     for epoch in range(1, 31):
-        loss = train(model, data, loader, optimizer, device)
+        loss = train(model, data, loader, optimizer, criterion, device)
         test_acc = test(data.test_mask, model, data, loader, device)
         print('Epoch: {:02d}, Loss: {:.4f}, Test: {:.4f}'.format(
               epoch, loss, test_acc))
