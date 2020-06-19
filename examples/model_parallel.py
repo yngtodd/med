@@ -10,7 +10,7 @@ import torch.distributed.autograd as dist_autograd
 from torch.distributed.optim import DistributedOptimizer
 
 from torch_geometric.datasets import Reddit
-from torch_geometric.data import NeighborSampler
+from torch_geometric.data import ClusterData, ClusterLoader
 from torch_geometric.nn import SAGEConv, GATConv
 
 
@@ -102,12 +102,13 @@ class GRPCNet(torch.nn.Module):
 def train(model, data, loader, optimizer, criterion, device):
     model.train()
     total_loss = 0
-    for data_flow in loader(data.train_mask):
-        with dist_autograd.context():
-            out = model(data.x.to(device), data_flow.to(device))
-            loss = criterion(out, data.y[data_flow.n_id].to(device))
-            dist_autograd.backward([loss])
-            optimizer.step()
+    for data in loader:
+        with dist_autograd.context() as context_id:
+            data = data.to(device)
+            out = model(data.x, data.edge_index)
+            loss = F.nll_loss(logits[data.train_mask], data.y[data.train_mask])
+            dist_autograd.backward(context_id, [loss])
+            optimizer.step(context_id)
             total_loss += loss.item() * data_flow.batch_size
     return total_loss / data.train_mask.sum().item()
 
@@ -115,7 +116,7 @@ def train(model, data, loader, optimizer, criterion, device):
 def test(mask, model, data, loader, device):
     model.eval()
     correct = 0
-    for data_flow in loader(mask):
+    for data_flow in loader:
         pred = model(data.x.to(device), data_flow.to(device)).max(1)[1]
         correct += pred.eq(data.y[data_flow.n_id].to(device)).sum().item()
     return correct / mask.sum().item()
@@ -124,10 +125,18 @@ def test(mask, model, data, loader, device):
 def run_trainer():
     dataset = Reddit('~/data')
     data = dataset[0]
-    loader = NeighborSampler(
-        data, size=[25, 10], num_hops=2, batch_size=1000, 
-        shuffle=True, add_self_loops=True
+
+    print('Partioning the graph... (this may take a while)')
+
+    cluster_data = ClusterData(
+        data, num_parts=1500, recursive=False, save_dir=dataset.processed_dir
     )
+
+    loader = ClusterLoader(
+        cluster_data, batch_size=20, shuffle=True, num_workers=6
+    )
+
+    print('Done!')
 
     #device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     device = torch.device('cpu')
